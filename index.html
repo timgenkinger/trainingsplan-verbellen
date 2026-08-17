@@ -219,6 +219,7 @@
   .toggle-btn{display:flex; align-items:center; gap:6px; user-select:none;}
   .toggle-btn input{width:14px; height:14px; accent-color:var(--accent); cursor:pointer; margin:0;}
   .toggle-btn.active{background:var(--accent-light); border-color:var(--accent); color:var(--accent-dark); font-weight:600;}
+  .boxdisable-row{width:100%; margin:10px 0; font-size:.82rem; box-sizing:border-box;}
   .hidden-note{
     font-size:.8rem; color:var(--muted); background:var(--accent-light); border:1px solid var(--line);
     border-radius:8px; padding:8px 12px; margin:0 0 10px;
@@ -491,7 +492,8 @@ function newDog(name){
     createdAt: new Date().toISOString(),
     box: emptyTrackState("box"),
     mensch: emptyTrackState("mensch"),
-    openStages: {}
+    openStages: {},
+    boxDisabled: false
   };
 }
 function normalizeDog(rawDog){
@@ -510,6 +512,7 @@ function normalizeDog(rawDog){
     });
   });
   d.openStages = rawDog.openStages || {};
+  d.boxDisabled = !!(rawDog && rawDog.boxDisabled);
   return d;
 }
 function defaultAppState(){
@@ -717,6 +720,7 @@ function stageComplete(dog, track, n){
   return items.length>0 && items.every(it => it.c1 && it.c2 && it.c3);
 }
 function menschUnlocked(dog, req){
+  if(dog.boxDisabled) return true;
   if(req === "all"){
     return BOX.every(st => stageComplete(dog, "box", st.n));
   }
@@ -849,8 +853,8 @@ function renderDogGrid(){
         </span>
       </div>
       <div class="miniprogress">
-        <div class="row"><span>Box</span><span>${boxPct}%</span></div>
-        <div class="bar-outer"><div class="bar-inner" style="width:${boxPct}%"></div></div>
+        <div class="row"><span>Box</span><span>${dog.boxDisabled ? "ausgesetzt" : boxPct+"%"}</span></div>
+        <div class="bar-outer"><div class="bar-inner" style="width:${dog.boxDisabled ? 0 : boxPct}%"></div></div>
       </div>
       <div class="miniprogress">
         <div class="row"><span>Mensch</span><span>${menschPct}%</span></div>
@@ -935,9 +939,12 @@ function renderTrackerView(){
     <div class="wrap">
       <div class="topcard">
         <div class="tabs">
-          <button class="tab-btn ${currentTab==="box"?"active":""}" data-tab="box">📦 Box (Kiste)</button>
+          <button class="tab-btn ${currentTab==="box"?"active":""}" data-tab="box">📦 Box (Kiste)${dog.boxDisabled ? " · ausgesetzt" : ""}</button>
           <button class="tab-btn ${currentTab==="mensch"?"active":""}" data-tab="mensch">🧍 Mensch</button>
         </div>
+        <label class="btn toggle-btn boxdisable-row ${dog.boxDisabled?"active":""}" id="boxDisableToggle">
+          <input type="checkbox" id="boxDisableCheckbox" ${dog.boxDisabled?"checked":""}> Box-Verbellen für diesen Hund aussetzen (Hund verbellt nur am Mensch)
+        </label>
         <div class="overall">
           <span id="overallLabel"></span>
           <span id="overallPct"></span>
@@ -961,6 +968,7 @@ function renderTrackerView(){
 
       <div class="legend">☐ = noch offen · 1×/2×/3× = erfolgreiche Wiederholungen in Folge · Datum = letzte erfolgreiche Wiederholung · Eine Stufe gilt als abgeschlossen, wenn bei jeder Übung dieser Stufe alle drei Haken gesetzt sind. Schafft der Hund eine Übung 3x hintereinander nicht, eine Stufe zurückgehen.</div>
 
+      <div id="trackNote" class="hidden-note" style="display:none;"></div>
       <div id="hiddenNote" class="hidden-note" style="display:none;"></div>
       <div id="stageList"></div>
     </div>
@@ -1001,6 +1009,11 @@ function renderTrackerView(){
     state.ui.hideCompleted = e.target.checked;
     saveState(); render();
   });
+  document.getElementById("boxDisableCheckbox").addEventListener("change", e=>{
+    dog.boxDisabled = e.target.checked;
+    if(dog.boxDisabled && state.ui.tab === "box") state.ui.tab = "mensch";
+    saveState(); render();
+  });
   document.getElementById("resetBtn").addEventListener("click", ()=>{
     if(confirm(`Wirklich den gesamten Trainingsfortschritt von "${dog.name || "diesem Hund"}" (Box und Mensch) löschen? Das kann nicht rückgängig gemacht werden.`)){
       dog.box = emptyTrackState("box");
@@ -1025,6 +1038,14 @@ function renderTrackerBody(dog, currentTab){
   document.getElementById("overallLabel").textContent = `${done} / ${total} Übungen abgeschlossen`;
   document.getElementById("overallPct").textContent = pct + "%";
   document.getElementById("overallBar").style.width = pct + "%";
+
+  const trackNoteEl = document.getElementById("trackNote");
+  if(dog.boxDisabled && currentTab === "box"){
+    trackNoteEl.style.display = "block";
+    trackNoteEl.textContent = "Box-Verbellen ist für diesen Hund ausgesetzt. Die Mensch-Stufen sind unabhängig vom Box-Fortschritt freigegeben – hier eingetragene Daten wirken sich auf nichts aus.";
+  }else{
+    trackNoteEl.style.display = "none";
+  }
 
   const hideCompleted = !!state.ui.hideCompleted;
   const allStages = DATA[currentTab];
@@ -1067,9 +1088,13 @@ function renderStage(dog, track, st){
   let reqText = "";
   if(track === "mensch"){
     const unlocked = menschUnlocked(dog, st.req);
-    reqText = st.req === "all"
-      ? "Voraussetzung: gesamte Box-Ausbildung (Stufe 1–33) abgeschlossen"
-      : `Voraussetzung: Box Stufe ${st.req[0]}–${st.req[1]} abgeschlossen`;
+    if(dog.boxDisabled){
+      reqText = "Voraussetzung: entfällt (Box-Verbellen für diesen Hund ausgesetzt)";
+    }else{
+      reqText = st.req === "all"
+        ? "Voraussetzung: gesamte Box-Ausbildung (Stufe 1–33) abgeschlossen"
+        : `Voraussetzung: Box Stufe ${st.req[0]}–${st.req[1]} abgeschlossen`;
+    }
     lockBadge = `<span class="badge ${unlocked?"unlocked":"locked"}">${unlocked?"freigegeben":"gesperrt"}</span>`;
   }
 
