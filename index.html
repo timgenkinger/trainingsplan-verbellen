@@ -176,6 +176,39 @@
   }
   .list-toolbar{display:flex; gap:8px; flex-wrap:wrap; margin-top:18px; justify-content:center;}
 
+  .btn.primary{background:var(--accent); color:#fff; border-color:var(--accent);}
+  .btn.primary:hover{background:var(--accent-dark); color:#fff;}
+
+  .sync-row{display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:12px;}
+  .sync-badge{font-size:.78rem; color:var(--muted);}
+  .sync-badge.synced{color:var(--ok);}
+  .sync-badge.error{color:var(--danger);}
+  .sync-badge.syncing, .sync-badge.pending{color:var(--accent);}
+
+  .modal-overlay{
+    position:fixed; inset:0; background:rgba(36,29,29,.55); display:flex; align-items:center; justify-content:center;
+    padding:16px; z-index:100;
+  }
+  .modal-card{
+    background:var(--card); border-radius:14px; max-width:460px; width:100%; padding:20px;
+    max-height:90vh; overflow-y:auto; box-shadow:0 12px 32px rgba(0,0,0,.25);
+  }
+  .modal-card h2{margin:0 0 8px; font-size:1.1rem;}
+  .modal-hint{font-size:.82rem; color:var(--muted); margin:0 0 14px;}
+  .modal-card label{display:block; font-size:.8rem; font-weight:600; margin:10px 0 4px;}
+  .modal-card input{
+    width:100%; padding:8px 10px; border-radius:8px; border:1px solid var(--line); font-size:.9rem;
+  }
+  .modal-details{font-size:.8rem; color:var(--muted); margin-top:12px;}
+  .modal-details summary{cursor:pointer; color:var(--accent); font-weight:600;}
+  .modal-details ol{margin:8px 0 0; padding-left:18px;}
+  .modal-details li{margin-bottom:4px;}
+  .modal-details code{background:var(--bg); padding:1px 5px; border-radius:4px;}
+  .modal-status{font-size:.82rem; margin-top:12px; min-height:1.2em;}
+  .modal-status.success{color:var(--ok);}
+  .modal-status.error{color:var(--danger);}
+  .modal-actions{display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:16px; flex-wrap:wrap;}
+
   .toggle-btn{display:flex; align-items:center; gap:6px; user-select:none;}
   .toggle-btn input{width:14px; height:14px; accent-color:var(--accent); cursor:pointer; margin:0;}
   .toggle-btn.active{background:var(--accent-light); border-color:var(--accent); color:var(--accent-dark); font-weight:600;}
@@ -244,6 +277,7 @@
 <div id="app"></div>
 
 <div id="printArea"></div>
+<div id="syncModalRoot"></div>
 <div class="savehint" id="saveHint">Gespeichert ✓</div>
 
 <script>
@@ -519,9 +553,152 @@ function saveState(){
     clearTimeout(saveTimer);
     saveTimer = setTimeout(()=>hint.classList.remove("show"), 900);
   }
+  scheduleCloudPush();
 }
 function currentDog(){
   return state.currentDogId ? state.dogs[state.currentDogId] : null;
+}
+
+/* ---------- Cloud-Sync (optional, ueber GitHub-Repo als Datenspeicher) ---------- */
+const SYNC_CONFIG_KEY = "verbellenSyncConfig_v1";
+function loadSyncConfig(){
+  try{
+    const raw = localStorage.getItem(SYNC_CONFIG_KEY);
+    if(!raw) return null;
+    const cfg = JSON.parse(raw);
+    if(cfg && cfg.token && cfg.owner && cfg.repo) return cfg;
+    return null;
+  }catch(e){ return null; }
+}
+function saveSyncConfig(cfg){
+  localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(cfg));
+  syncConfig = cfg;
+}
+function clearSyncConfig(){
+  localStorage.removeItem(SYNC_CONFIG_KEY);
+  syncConfig = null;
+  syncMeta.sha = null;
+  syncMeta.status = "unconfigured";
+}
+let syncConfig = loadSyncConfig();
+let syncMeta = { status: syncConfig ? "idle" : "unconfigured", lastError:null, sha:null, lastSyncedAt:null, pushTimer:null };
+
+function utf8ToBase64(str){
+  const bytes = new TextEncoder().encode(str);
+  let binary = "";
+  bytes.forEach(b => binary += String.fromCharCode(b));
+  return btoa(binary);
+}
+function base64ToUtf8(b64){
+  const binary = atob(b64.replace(/\n/g,""));
+  const bytes = new Uint8Array(binary.length);
+  for(let i=0;i<binary.length;i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+function syncApiUrl(){
+  return `https://api.github.com/repos/${syncConfig.owner}/${syncConfig.repo}/contents/${syncConfig.path || "state.json"}`;
+}
+async function cloudGet(){
+  const res = await fetch(syncApiUrl(), {
+    headers: { "Authorization": "Bearer " + syncConfig.token, "Accept": "application/vnd.github+json" }
+  });
+  if(res.status === 404) return null;
+  if(!res.ok) throw new Error("Fehler beim Laden (HTTP " + res.status + ")");
+  const json = await res.json();
+  syncMeta.sha = json.sha;
+  return JSON.parse(base64ToUtf8(json.content));
+}
+async function cloudPut(data, retry){
+  const body = {
+    message: "Trainingsfortschritt aktualisiert – " + new Date().toISOString(),
+    content: utf8ToBase64(JSON.stringify(data, null, 2)),
+    branch: "main"
+  };
+  if(syncMeta.sha) body.sha = syncMeta.sha;
+  const res = await fetch(syncApiUrl(), {
+    method: "PUT",
+    headers: {
+      "Authorization": "Bearer " + syncConfig.token,
+      "Accept": "application/vnd.github+json",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  if(res.status === 409 && !retry){
+    await cloudGet();
+    return cloudPut(data, true);
+  }
+  if(!res.ok){
+    let detail = "";
+    try{ detail = (await res.json()).message || ""; }catch(e){}
+    throw new Error("Fehler beim Speichern (HTTP " + res.status + ")" + (detail ? ": " + detail : ""));
+  }
+  const json = await res.json();
+  syncMeta.sha = json.content.sha;
+}
+function mergeRemoteIntoState(remote){
+  const base = defaultAppState();
+  const order = remote.dogOrder || Object.keys(remote.dogs || {});
+  order.forEach(id=>{
+    if(remote.dogs && remote.dogs[id]) base.dogs[id] = normalizeDog(remote.dogs[id]);
+  });
+  state.dogs = base.dogs;
+  state.dogOrder = order.filter(id=>state.dogs[id]);
+  if(state.currentDogId && !state.dogs[state.currentDogId]) state.currentDogId = null;
+  if(!state.currentDogId && state.ui.view === "tracker") state.ui.view = "list";
+}
+async function pullFromCloud(){
+  if(!syncConfig) return;
+  syncMeta.status = "syncing";
+  try{
+    const remote = await cloudGet();
+    if(remote) mergeRemoteIntoState(remote);
+    syncMeta.status = "synced";
+    syncMeta.lastError = null;
+    syncMeta.lastSyncedAt = new Date();
+  }catch(e){
+    syncMeta.status = "error";
+    syncMeta.lastError = e.message;
+    console.warn("Cloud-Sync (Laden) fehlgeschlagen:", e);
+  }
+}
+function cloudDataFromState(){
+  return { dogs: state.dogs, dogOrder: state.dogOrder };
+}
+function scheduleCloudPush(){
+  if(!syncConfig) return;
+  clearTimeout(syncMeta.pushTimer);
+  syncMeta.status = "pending";
+  updateSyncBadge();
+  syncMeta.pushTimer = setTimeout(async ()=>{
+    syncMeta.status = "syncing";
+    updateSyncBadge();
+    try{
+      await cloudPut(cloudDataFromState());
+      syncMeta.status = "synced";
+      syncMeta.lastError = null;
+      syncMeta.lastSyncedAt = new Date();
+    }catch(e){
+      syncMeta.status = "error";
+      syncMeta.lastError = e.message;
+      console.warn("Cloud-Sync (Speichern) fehlgeschlagen:", e);
+    }
+    updateSyncBadge();
+  }, 2500);
+}
+function syncStatusText(){
+  if(!syncConfig) return "nicht eingerichtet";
+  if(syncMeta.status === "syncing") return "wird synchronisiert …";
+  if(syncMeta.status === "pending") return "Änderung wird gleich hochgeladen …";
+  if(syncMeta.status === "error") return "Fehler – " + (syncMeta.lastError || "unbekannt");
+  if(syncMeta.status === "synced") return "verbunden mit " + syncConfig.owner + "/" + syncConfig.repo;
+  return "verbunden";
+}
+function updateSyncBadge(){
+  const el = document.getElementById("syncBadge");
+  if(!el) return;
+  el.textContent = "☁️ Cloud-Sync: " + syncStatusText();
+  el.className = "sync-badge " + (syncConfig ? syncMeta.status : "unconfigured");
 }
 
 /* ---------- Ableitungen ---------- */
@@ -591,6 +768,10 @@ function renderDogListView(){
     </header>
     <div class="wrap">
       <div class="topcard">
+        <div class="sync-row">
+          <span id="syncBadge" class="sync-badge"></span>
+          <button class="btn" id="syncSettingsBtn">☁️ ${syncConfig ? "Sync-Einstellungen" : "Cloud-Sync einrichten"}</button>
+        </div>
         <div id="dogGridHost"></div>
         <div class="list-toolbar">
           <button class="btn" id="exportAllBtn">Gesamt-Backup exportieren</button>
@@ -599,8 +780,11 @@ function renderDogListView(){
         </div>
       </div>
     </div>
-    <footer>Alle Daten werden ausschließlich lokal in diesem Browser gespeichert (localStorage) – keine Übertragung ins Internet.</footer>
+    <footer>Ohne eingerichteten Cloud-Sync bleiben alle Daten ausschließlich lokal in diesem Browser (localStorage) – keine Übertragung ins Internet. Mit eingerichtetem Cloud-Sync werden sie zusätzlich per HTTPS mit deinem privaten GitHub-Repository abgeglichen.</footer>
   `;
+
+  document.getElementById("syncSettingsBtn").addEventListener("click", openSyncModal);
+  updateSyncBadge();
 
   const host = document.getElementById("dogGridHost");
   const ids = state.dogOrder.filter(id=>state.dogs[id]);
@@ -748,7 +932,7 @@ function renderTrackerView(){
       <div id="hiddenNote" class="hidden-note" style="display:none;"></div>
       <div id="stageList"></div>
     </div>
-    <footer>Alle Daten werden ausschließlich lokal in diesem Browser gespeichert (localStorage) – keine Übertragung ins Internet.</footer>
+    <footer>Ohne eingerichteten Cloud-Sync bleiben alle Daten ausschließlich lokal in diesem Browser gespeichert (localStorage) – keine Übertragung ins Internet. Mit eingerichtetem Cloud-Sync werden sie zusätzlich per HTTPS mit deinem privaten GitHub-Repository abgeglichen.</footer>
   `;
 
   document.getElementById("backBtn").addEventListener("click", ()=>{
@@ -1093,7 +1277,101 @@ function exportDogPdf(dog){
   window.print();
 }
 
-render();
+/* ================= Cloud-Sync Modal ================= */
+function openSyncModal(){
+  const root = document.getElementById("syncModalRoot");
+  const cfg = syncConfig;
+  root.innerHTML = `
+    <div class="modal-overlay" id="modalOverlay">
+      <div class="modal-card">
+        <h2>☁️ Cloud-Sync einrichten</h2>
+        <p class="modal-hint">Verbindet die App mit einem privaten GitHub-Repository, damit alle Geräte denselben Trainingsfortschritt sehen. Der Fortschritt wird dabei per HTTPS an dieses Repo übertragen.</p>
+        <label for="syncOwnerRepo">Repository (Format: benutzername/repo)</label>
+        <input type="text" id="syncOwnerRepo" value="${escapeAttr(cfg ? cfg.owner+"/"+cfg.repo : "timgenkinger/trainingsplan-verbellen-data")}">
+        <label for="syncToken">Persönlicher GitHub-Token</label>
+        <input type="password" id="syncToken" placeholder="${cfg ? "•••••••••••••• (bereits gespeichert, leer lassen zum Beibehalten)" : "ghp_… oder github_pat_…"}" autocomplete="off">
+        <details class="modal-details">
+          <summary>Wie bekomme ich einen Token?</summary>
+          <ol>
+            <li>Auf <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">github.com/settings/personal-access-tokens/new</a> öffnen (im selben GitHub-Account wie das Repo).</li>
+            <li>Als "Resource owner" deinen Account wählen.</li>
+            <li>Bei "Repository access" → "Only select repositories" → das Daten-Repo auswählen.</li>
+            <li>Bei "Permissions" → "Repository permissions" → "Contents" auf <b>Read and write</b> stellen.</li>
+            <li>Token erstellen und hier einfügen (wird auf GitHub nur einmal angezeigt).</li>
+          </ol>
+        </details>
+        <div id="syncModalStatus" class="modal-status"></div>
+        <div class="modal-actions">
+          ${cfg ? '<button class="btn danger" id="syncDisconnectBtn">Sync trennen</button>' : '<span></span>'}
+          <div style="display:flex; gap:8px;">
+            <button class="btn" id="syncCancelBtn">Abbrechen</button>
+            <button class="btn primary" id="syncConnectBtn">Verbinden &amp; testen</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  document.getElementById("syncCancelBtn").addEventListener("click", closeSyncModal);
+  document.getElementById("modalOverlay").addEventListener("click", e=>{ if(e.target.id==="modalOverlay") closeSyncModal(); });
+  if(cfg){
+    document.getElementById("syncDisconnectBtn").addEventListener("click", ()=>{
+      if(confirm("Cloud-Sync wirklich trennen? Die App speichert danach wieder nur lokal auf diesem Gerät.")){
+        clearSyncConfig();
+        closeSyncModal();
+        render();
+      }
+    });
+  }
+  document.getElementById("syncConnectBtn").addEventListener("click", async ()=>{
+    const ownerRepo = document.getElementById("syncOwnerRepo").value.trim();
+    const tokenInput = document.getElementById("syncToken").value.trim();
+    const statusEl = document.getElementById("syncModalStatus");
+    const parts = ownerRepo.split("/").map(s=>s.trim());
+    if(parts.length !== 2 || !parts[0] || !parts[1]){
+      statusEl.textContent = "Bitte im Format benutzername/repo angeben.";
+      statusEl.className = "modal-status error";
+      return;
+    }
+    const token = tokenInput || (cfg ? cfg.token : "");
+    if(!token){
+      statusEl.textContent = "Bitte einen Token eingeben.";
+      statusEl.className = "modal-status error";
+      return;
+    }
+    statusEl.textContent = "Verbindung wird getestet …";
+    statusEl.className = "modal-status";
+    const prevConfig = syncConfig;
+    const prevSha = syncMeta.sha;
+    syncConfig = {owner:parts[0], repo:parts[1], token, path:"state.json"};
+    syncMeta.sha = null;
+    await pullFromCloud();
+    if(syncMeta.status === "error"){
+      statusEl.textContent = "Verbindung fehlgeschlagen: " + syncMeta.lastError;
+      statusEl.className = "modal-status error";
+      syncConfig = prevConfig;
+      syncMeta.sha = prevSha;
+      syncMeta.status = prevConfig ? "idle" : "unconfigured";
+      return;
+    }
+    saveSyncConfig(syncConfig);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    statusEl.textContent = "Verbunden! Fortschritt wird ab jetzt automatisch synchronisiert.";
+    statusEl.className = "modal-status success";
+    setTimeout(()=>{ closeSyncModal(); render(); }, 900);
+  });
+}
+function closeSyncModal(){
+  document.getElementById("syncModalRoot").innerHTML = "";
+}
+
+async function initApp(){
+  if(syncConfig){
+    await pullFromCloud();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }
+  render();
+}
+initApp();
 </script>
 </body>
 </html>
