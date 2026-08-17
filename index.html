@@ -644,15 +644,15 @@ async function cloudPut(data, retry){
   syncMeta.sha = json.content.sha;
 }
 function mergeRemoteIntoState(remote){
-  const base = defaultAppState();
-  const order = remote.dogOrder || Object.keys(remote.dogs || {});
-  order.forEach(id=>{
-    if(remote.dogs && remote.dogs[id]) base.dogs[id] = normalizeDog(remote.dogs[id]);
+  // Lokale Daten haben immer Vorrang: bestehende Hunde werden nie durch die Cloud-Version
+  // ueberschrieben. Nur Hunde, die lokal noch gar nicht existieren, werden aus der Cloud uebernommen.
+  const remoteOrder = remote.dogOrder || Object.keys(remote.dogs || {});
+  remoteOrder.forEach(id=>{
+    if(!state.dogs[id] && remote.dogs && remote.dogs[id]){
+      state.dogs[id] = normalizeDog(remote.dogs[id]);
+      state.dogOrder.push(id);
+    }
   });
-  state.dogs = base.dogs;
-  state.dogOrder = order.filter(id=>state.dogs[id]);
-  if(state.currentDogId && !state.dogs[state.currentDogId]) state.currentDogId = null;
-  if(!state.currentDogId && state.ui.view === "tracker") state.ui.view = "list";
 }
 async function pullFromCloud(){
   if(!syncConfig) return;
@@ -660,13 +660,16 @@ async function pullFromCloud(){
   try{
     const remote = await cloudGet();
     if(remote) mergeRemoteIntoState(remote);
+    // Lokaler Stand ist fuehrend: Cloud direkt danach an den (ggf. um neue Hunde ergaenzten)
+    // lokalen Stand angleichen, statt lokale Aenderungen durch die Cloud-Version zu verlieren.
+    await cloudPut(cloudDataFromState());
     syncMeta.status = "synced";
     syncMeta.lastError = null;
     syncMeta.lastSyncedAt = new Date();
   }catch(e){
     syncMeta.status = "error";
     syncMeta.lastError = e.message;
-    console.warn("Cloud-Sync (Laden) fehlgeschlagen:", e);
+    console.warn("Cloud-Sync fehlgeschlagen:", e);
   }
 }
 function cloudDataFromState(){
