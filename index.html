@@ -180,6 +180,13 @@
   .btn.primary:hover{background:var(--accent-dark); color:#fff;}
 
   .sync-row{display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:12px;}
+
+  .search-row{margin-bottom:14px;}
+  .search-input{
+    width:100%; padding:10px 14px; border-radius:10px; border:1px solid var(--line);
+    font-size:.92rem; background:#fff;
+  }
+  .search-input:focus{outline:none; border-color:var(--accent);}
   .sync-badge{font-size:.78rem; color:var(--muted);}
   .sync-badge.synced{color:var(--ok);}
   .sync-badge.error{color:var(--danger);}
@@ -758,6 +765,8 @@ function render(){
 }
 
 /* ---------- Hundeauswahl ---------- */
+let dogSearchQuery = "";
+
 function renderDogListView(){
   appEl.innerHTML = `
     <header>
@@ -771,6 +780,9 @@ function renderDogListView(){
         <div class="sync-row">
           <span id="syncBadge" class="sync-badge"></span>
           <button class="btn" id="syncSettingsBtn">☁️ ${syncConfig ? "Sync-Einstellungen" : "Cloud-Sync einrichten"}</button>
+        </div>
+        <div class="search-row">
+          <input type="search" id="dogSearchInput" class="search-input" placeholder="🔍 Hund suchen …" value="${escapeAttr(dogSearchQuery)}">
         </div>
         <div id="dogGridHost"></div>
         <div class="list-toolbar">
@@ -786,11 +798,32 @@ function renderDogListView(){
   document.getElementById("syncSettingsBtn").addEventListener("click", openSyncModal);
   updateSyncBadge();
 
-  const host = document.getElementById("dogGridHost");
-  const ids = state.dogOrder.filter(id=>state.dogs[id]);
+  document.getElementById("dogSearchInput").addEventListener("input", e=>{
+    dogSearchQuery = e.target.value;
+    renderDogGrid();
+  });
 
-  if(ids.length === 0){
+  document.getElementById("exportAllBtn").addEventListener("click", exportAllBackup);
+  document.getElementById("importAllBtn").addEventListener("click", ()=>document.getElementById("importAllFile").click());
+  document.getElementById("importAllFile").addEventListener("change", handleImportAllFile);
+
+  renderDogGrid();
+}
+
+function renderDogGrid(){
+  const host = document.getElementById("dogGridHost");
+  const allIds = state.dogOrder.filter(id=>state.dogs[id]);
+  const query = dogSearchQuery.trim().toLowerCase();
+  const ids = query
+    ? allIds.filter(id => (state.dogs[id].name || "").toLowerCase().includes(query))
+    : allIds;
+
+  host.innerHTML = "";
+
+  if(allIds.length === 0){
     host.innerHTML = `<div class="empty-hint">Noch kein Hund angelegt. Füge unten deinen ersten Hund hinzu.</div>`;
+  }else if(ids.length === 0){
+    host.innerHTML = `<div class="empty-hint">Kein Hund gefunden für "${escapeHtml(dogSearchQuery.trim())}".</div>`;
   }
 
   const grid = document.createElement("div");
@@ -833,7 +866,7 @@ function renderDogListView(){
       if(name !== null){
         dog.name = name.trim();
         saveState();
-        render();
+        renderDogGrid();
       }
     });
     card.querySelector('[data-act="delete"]').addEventListener("click", ()=>{
@@ -842,7 +875,7 @@ function renderDogListView(){
         state.dogOrder = state.dogOrder.filter(x=>x!==id);
         if(state.currentDogId === id) state.currentDogId = null;
         saveState();
-        render();
+        renderDogGrid();
       }
     });
     grid.appendChild(card);
@@ -873,10 +906,6 @@ function renderDogListView(){
   document.getElementById("newDogName").addEventListener("keydown", e=>{
     if(e.key === "Enter") addDog();
   });
-
-  document.getElementById("exportAllBtn").addEventListener("click", exportAllBackup);
-  document.getElementById("importAllBtn").addEventListener("click", ()=>document.getElementById("importAllFile").click());
-  document.getElementById("importAllFile").addEventListener("change", handleImportAllFile);
 }
 
 /* ---------- Tracker-Ansicht (pro Hund) ---------- */
