@@ -136,9 +136,24 @@
     padding:4px 6px; border-radius:6px;
   }
   .del-custom-btn:hover{background:var(--danger-bg); color:var(--danger);}
-  .add-custom-row{padding:10px 14px;}
-  .add-custom-row .btn{width:100%; border-style:dashed; color:var(--muted);}
-  .add-custom-row .btn:hover{border-color:var(--accent); color:var(--accent); border-style:dashed;}
+
+  .add-custom-trigger{
+    border:none; background:transparent; cursor:pointer; font-size:1rem; color:var(--muted);
+    padding:2px 7px; border-radius:6px; flex:none;
+  }
+  .add-custom-trigger:hover{background:var(--accent-light); color:var(--accent);}
+
+  .custom-entry{
+    background:#fbf8f2; border:1px solid #eddfc0; border-left:4px solid #d9a441;
+    border-radius:12px; margin:-2px 0 10px 18px; overflow:hidden;
+  }
+  .custom-entry.done{border-left-color:var(--ok);}
+  .custom-entry-head{
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    padding:8px 14px 0;
+  }
+  .custom-entry-tag{font-size:.74rem; font-weight:600; color:#8a621f;}
+  .custom-entry .item{border-bottom:none;}
   .legend{
     font-size:.78rem; color:var(--muted); margin:4px 0 14px;
   }
@@ -255,7 +270,8 @@
     .stage-num{order:0;}
     .badge{order:2;}
     .stage-frac{order:3;}
-    .chev{order:4; margin-left:auto;}
+    .add-custom-trigger{order:4;}
+    .chev{order:5; margin-left:auto;}
 
     .item{flex-direction:column; align-items:stretch; padding:10px 12px;}
     .item-id{width:auto; padding-top:0; font-weight:600;}
@@ -854,13 +870,20 @@ function renderDogListView(){
   renderDogGrid();
 }
 
+function dogProgressPct(dog){
+  const prog = overallProgress(dog);
+  return prog.total ? prog.done / prog.total : 0;
+}
+
 function renderDogGrid(){
   const host = document.getElementById("dogGridHost");
   const allIds = state.dogOrder.filter(id=>state.dogs[id]);
   const query = dogSearchQuery.trim().toLowerCase();
-  const ids = query
+  const filteredIds = query
     ? allIds.filter(id => (state.dogs[id].name || "").toLowerCase().includes(query))
     : allIds;
+  // Groesster Gesamtfortschritt zuerst; bei Gleichstand bleibt die bisherige Reihenfolge erhalten.
+  const ids = filteredIds.slice().sort((a,b)=> dogProgressPct(state.dogs[b]) - dogProgressPct(state.dogs[a]));
 
   host.innerHTML = "";
 
@@ -1109,6 +1132,11 @@ function renderTrackerBody(dog, currentTab){
   }
   visibleStages.forEach(st=>{
     stageListEl.appendChild(renderStage(dog, currentTab, st));
+    const customList = (dog.customItems[currentTab] && dog.customItems[currentTab][st.n]) || [];
+    const visibleCustom = hideCompleted ? customList.filter(it=>!(it.c1&&it.c2&&it.c3)) : customList;
+    visibleCustom.forEach(item=>{
+      stageListEl.appendChild(renderCustomEntry(dog, currentTab, st, item));
+    });
   });
 }
 
@@ -1145,12 +1173,23 @@ function renderStage(dog, track, st){
     </div>
     ${lockBadge}
     <div class="stage-frac">${doneCount}/${items.length}</div>
+    <button class="icon-btn add-custom-trigger" type="button" title="Zusatzübung nach dieser Stufe hinzufügen">➕</button>
     <div class="chev">▶</div>
   `;
   head.addEventListener("click", ()=>{
     dog.openStages[track+"-"+st.n] = !isOpen;
     saveState();
     render();
+  });
+  head.querySelector(".add-custom-trigger").addEventListener("click", (e)=>{
+    e.stopPropagation();
+    const text = prompt("Neue Zusatzübung nach Stufe " + st.n + " (" + st.title + "):");
+    if(text && text.trim()){
+      if(!dog.customItems[track][st.n]) dog.customItems[track][st.n] = [];
+      dog.customItems[track][st.n].push(newCustomItem(text.trim()));
+      saveState();
+      render();
+    }
   });
   wrap.appendChild(head);
 
@@ -1159,81 +1198,64 @@ function renderStage(dog, track, st){
   st.items.forEach((text, idx)=>{
     body.appendChild(renderItem(dog, track, st.n, idx, text));
   });
-
-  const customList = (dog.customItems[track] && dog.customItems[track][st.n]) || [];
-  customList.forEach(item=>{
-    body.appendChild(renderCustomItem(dog, track, st.n, item));
-  });
-
-  const addRow = document.createElement("div");
-  addRow.className = "add-custom-row";
-  addRow.innerHTML = `<button class="btn" type="button">➕ Übung hinzufügen</button>`;
-  addRow.querySelector("button").addEventListener("click", ()=>{
-    const text = prompt("Neue eigene Übung für Stufe " + st.n + ":");
-    if(text && text.trim()){
-      if(!dog.customItems[track][st.n]) dog.customItems[track][st.n] = [];
-      dog.customItems[track][st.n].push(newCustomItem(text.trim()));
-      dog.openStages[track+"-"+st.n] = true;
-      saveState();
-      render();
-    }
-  });
-  body.appendChild(addRow);
-
   wrap.appendChild(body);
 
   return wrap;
 }
 
-function renderCustomItem(dog, track, stageN, data){
-  const complete = data.c1 && data.c2 && data.c3;
+function renderCustomEntry(dog, track, st, item){
+  const complete = item.c1 && item.c2 && item.c3;
 
-  const row = document.createElement("div");
-  row.className = "item custom-item" + (complete?" complete":"");
-
-  row.innerHTML = `
-    <div class="item-id" title="Eigene Übung">＋</div>
-    <div class="item-text">${escapeHtml(data.text)}</div>
-    <div class="item-controls">
-      <div class="checks">
-        <label>1×<input type="checkbox" data-k="c1" ${data.c1?"checked":""}></label>
-        <label>2×<input type="checkbox" data-k="c2" ${data.c2?"checked":""}></label>
-        <label>3×<input type="checkbox" data-k="c3" ${data.c3?"checked":""}></label>
+  const wrap = document.createElement("div");
+  wrap.className = "custom-entry" + (complete?" done":"");
+  wrap.innerHTML = `
+    <div class="custom-entry-head">
+      <span class="custom-entry-tag">➕ Zusatzübung nach Stufe ${st.n}: ${escapeHtml(st.title)}</span>
+      <button class="icon-btn del-custom-btn" type="button" title="Zusatzübung löschen">🗑</button>
+    </div>
+    <div class="item custom-item${complete?" complete":""}">
+      <div class="item-id" title="Eigene Übung">＋</div>
+      <div class="item-text">${escapeHtml(item.text)}</div>
+      <div class="item-controls">
+        <div class="checks">
+          <label>1×<input type="checkbox" data-k="c1" ${item.c1?"checked":""}></label>
+          <label>2×<input type="checkbox" data-k="c2" ${item.c2?"checked":""}></label>
+          <label>3×<input type="checkbox" data-k="c3" ${item.c3?"checked":""}></label>
+        </div>
+        <input type="date" data-k="date" value="${item.date||""}">
+        <input type="text" data-k="remark" placeholder="Bemerkung" value="${escapeAttr(item.remark||"")}">
       </div>
-      <input type="date" data-k="date" value="${data.date||""}">
-      <input type="text" data-k="remark" placeholder="Bemerkung" value="${escapeAttr(data.remark||"")}">
-      <button class="icon-btn del-custom-btn" title="Eigene Übung löschen">🗑</button>
     </div>
   `;
 
-  row.querySelectorAll('input[type=checkbox]').forEach(cb=>{
+  wrap.querySelectorAll('input[type=checkbox]').forEach(cb=>{
     cb.addEventListener("change", ()=>{
       const k = cb.dataset.k;
-      data[k] = cb.checked;
-      if(k==="c3" && cb.checked && !data.date){
-        data.date = todayISO();
+      item[k] = cb.checked;
+      if(k==="c3" && cb.checked && !item.date){
+        item.date = todayISO();
       }
       saveState();
       render();
     });
   });
-  row.querySelector('input[type=date]').addEventListener("change", e=>{
-    data.date = e.target.value;
+  wrap.querySelector('input[type=date]').addEventListener("change", e=>{
+    item.date = e.target.value;
     saveState();
   });
-  row.querySelector('input[type=text]').addEventListener("input", e=>{
-    data.remark = e.target.value;
+  wrap.querySelector('input[type=text]').addEventListener("input", e=>{
+    item.remark = e.target.value;
     saveState();
   });
-  row.querySelector(".del-custom-btn").addEventListener("click", ()=>{
-    if(confirm(`Eigene Übung "${data.text}" wirklich löschen?`)){
-      dog.customItems[track][stageN] = dog.customItems[track][stageN].filter(it=>it.id !== data.id);
+  wrap.querySelector(".del-custom-btn").addEventListener("click", ()=>{
+    if(confirm(`Zusatzübung "${item.text}" wirklich löschen?`)){
+      dog.customItems[track][st.n] = dog.customItems[track][st.n].filter(it=>it.id !== item.id);
       saveState();
       render();
     }
   });
 
-  return row;
+  return wrap;
 }
 
 function renderItem(dog, track, stageN, idx, text){
