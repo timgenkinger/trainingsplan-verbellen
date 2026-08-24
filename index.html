@@ -148,6 +148,7 @@
     border-radius:12px; margin:-2px 0 10px 18px; overflow:hidden;
   }
   .custom-entry.done{border-left-color:var(--ok);}
+  .custom-entry.nested{margin:0 14px 8px 32px; border-radius:10px;}
   .custom-entry-head{
     display:flex; align-items:center; justify-content:space-between; gap:8px;
     padding:8px 14px 0;
@@ -532,6 +533,18 @@ function newCustomItem(text){
     c1:false, c2:false, c3:false, date:"", remark:""
   };
 }
+function normalizeCustomItem(it){
+  return Object.assign(newCustomItem(""), it);
+}
+// Liefert (und legt bei Bedarf an) den Zusatzuebungs-Behaelter einer Stufe:
+// "end" = Zusatzuebungen nach der gesamten Stufe, "byItem" = nach einer bestimmten Unteruebung (Index -> Liste).
+function customBucket(dog, track, stageN){
+  if(!dog.customItems[track][stageN]) dog.customItems[track][stageN] = { end: [], byItem: {} };
+  const b = dog.customItems[track][stageN];
+  if(!Array.isArray(b.end)) b.end = [];
+  if(!b.byItem || typeof b.byItem !== "object") b.byItem = {};
+  return b;
+}
 function normalizeDog(rawDog){
   const d = newDog(rawDog && rawDog.name);
   if(!rawDog) return d;
@@ -552,8 +565,23 @@ function normalizeDog(rawDog){
   ["box","mensch"].forEach(track=>{
     const raw = (rawDog.customItems && rawDog.customItems[track]) || {};
     Object.keys(raw).forEach(stageN=>{
-      if(!Array.isArray(raw[stageN])) return;
-      d.customItems[track][stageN] = raw[stageN].map(it=> Object.assign(newCustomItem(""), it));
+      const rawBucket = raw[stageN];
+      if(!rawBucket) return;
+      if(Array.isArray(rawBucket)){
+        // Altes Format (vor Unteruebungs-Zuordnung): flache Liste = "nach der Stufe".
+        d.customItems[track][stageN] = { end: rawBucket.map(normalizeCustomItem), byItem: {} };
+      }else{
+        const end = Array.isArray(rawBucket.end) ? rawBucket.end.map(normalizeCustomItem) : [];
+        const byItem = {};
+        if(rawBucket.byItem && typeof rawBucket.byItem === "object"){
+          Object.keys(rawBucket.byItem).forEach(idx=>{
+            if(Array.isArray(rawBucket.byItem[idx])){
+              byItem[idx] = rawBucket.byItem[idx].map(normalizeCustomItem);
+            }
+          });
+        }
+        d.customItems[track][stageN] = { end, byItem };
+      }
     });
   });
   return d;
@@ -1151,7 +1179,8 @@ function renderTrackerBody(dog, currentTab){
   }
   visibleStages.forEach(st=>{
     stageListEl.appendChild(renderStage(dog, currentTab, st));
-    const customList = (dog.customItems[currentTab] && dog.customItems[currentTab][st.n]) || [];
+    const bucket = dog.customItems[currentTab] && dog.customItems[currentTab][st.n];
+    const customList = (bucket && bucket.end) || [];
     const visibleCustom = hideCompleted ? customList.filter(it=>!(it.c1&&it.c2&&it.c3)) : customList;
     visibleCustom.forEach(item=>{
       stageListEl.appendChild(renderCustomEntry(dog, currentTab, st, item));
@@ -1204,8 +1233,7 @@ function renderStage(dog, track, st){
     e.stopPropagation();
     const text = prompt("Neue Zusatzübung nach Stufe " + st.n + " (" + st.title + "):");
     if(text && text.trim()){
-      if(!dog.customItems[track][st.n]) dog.customItems[track][st.n] = [];
-      dog.customItems[track][st.n].push(newCustomItem(text.trim()));
+      customBucket(dog, track, st.n).end.push(newCustomItem(text.trim()));
       saveState();
       render();
     }
@@ -1216,6 +1244,11 @@ function renderStage(dog, track, st){
   body.className = "stage-body";
   st.items.forEach((text, idx)=>{
     body.appendChild(renderItem(dog, track, st.n, idx, text));
+    const bucket = dog.customItems[track][st.n];
+    const byItemList = (bucket && bucket.byItem && bucket.byItem[String(idx)]) || [];
+    byItemList.forEach(item=>{
+      body.appendChild(renderItemLevelCustom(dog, track, st, idx, item));
+    });
   });
   wrap.appendChild(body);
 
@@ -1268,7 +1301,65 @@ function renderCustomEntry(dog, track, st, item){
   });
   wrap.querySelector(".del-custom-btn").addEventListener("click", ()=>{
     if(confirm(`Zusatzübung "${item.text}" wirklich löschen?`)){
-      dog.customItems[track][st.n] = dog.customItems[track][st.n].filter(it=>it.id !== item.id);
+      const bucket = customBucket(dog, track, st.n);
+      bucket.end = bucket.end.filter(it=>it.id !== item.id);
+      saveState();
+      render();
+    }
+  });
+
+  return wrap;
+}
+
+function renderItemLevelCustom(dog, track, st, idx, item){
+  const complete = item.c1 && item.c2 && item.c3;
+
+  const wrap = document.createElement("div");
+  wrap.className = "custom-entry nested" + (complete?" done":"");
+  wrap.innerHTML = `
+    <div class="custom-entry-head">
+      <span class="custom-entry-tag">➕ Zusatzübung nach Übung ${st.n}.${idx+1}</span>
+      <button class="icon-btn del-custom-btn" type="button" title="Zusatzübung löschen">🗑</button>
+    </div>
+    <div class="item custom-item${complete?" complete":""}">
+      <div class="item-id" title="Eigene Übung">＋</div>
+      <div class="item-text">${escapeHtml(item.text)}</div>
+      <div class="item-controls">
+        <div class="checks">
+          <label>1×<input type="checkbox" data-k="c1" ${item.c1?"checked":""}></label>
+          <label>2×<input type="checkbox" data-k="c2" ${item.c2?"checked":""}></label>
+          <label>3×<input type="checkbox" data-k="c3" ${item.c3?"checked":""}></label>
+        </div>
+        <input type="date" data-k="date" value="${item.date||""}">
+        <input type="text" data-k="remark" placeholder="Bemerkung" value="${escapeAttr(item.remark||"")}">
+      </div>
+    </div>
+  `;
+
+  wrap.querySelectorAll('input[type=checkbox]').forEach(cb=>{
+    cb.addEventListener("change", ()=>{
+      const k = cb.dataset.k;
+      item[k] = cb.checked;
+      if(k==="c3" && cb.checked && !item.date){
+        item.date = todayISO();
+      }
+      saveState();
+      render();
+    });
+  });
+  wrap.querySelector('input[type=date]').addEventListener("change", e=>{
+    item.date = e.target.value;
+    saveState();
+  });
+  wrap.querySelector('input[type=text]').addEventListener("input", e=>{
+    item.remark = e.target.value;
+    saveState();
+  });
+  wrap.querySelector(".del-custom-btn").addEventListener("click", ()=>{
+    if(confirm(`Zusatzübung "${item.text}" wirklich löschen?`)){
+      const bucket = customBucket(dog, track, st.n);
+      const key = String(idx);
+      bucket.byItem[key] = (bucket.byItem[key] || []).filter(it=>it.id !== item.id);
       saveState();
       render();
     }
@@ -1296,6 +1387,7 @@ function renderItem(dog, track, stageN, idx, text){
       </div>
       <input type="date" data-k="date" value="${data.date||""}">
       <input type="text" data-k="remark" placeholder="Bemerkung" value="${escapeAttr(data.remark||"")}">
+      <button class="icon-btn add-custom-trigger" type="button" title="Zusatzübung nach ${id} hinzufügen">➕</button>
     </div>
   `;
 
@@ -1317,6 +1409,17 @@ function renderItem(dog, track, stageN, idx, text){
   row.querySelector('input[type=text]').addEventListener("input", e=>{
     data.remark = e.target.value;
     saveState();
+  });
+  row.querySelector(".add-custom-trigger").addEventListener("click", ()=>{
+    const text2 = prompt("Neue Zusatzübung nach Übung " + id + ":");
+    if(text2 && text2.trim()){
+      const bucket = customBucket(dog, track, stageN);
+      const key = String(idx);
+      if(!bucket.byItem[key]) bucket.byItem[key] = [];
+      bucket.byItem[key].push(newCustomItem(text2.trim()));
+      saveState();
+      render();
+    }
   });
 
   return row;
@@ -1398,8 +1501,19 @@ function excelRows(dog, track){
     ? ["Nr.","Übung","1x","2x","3x","Datum","Voraussetzung (Box)","Bemerkung"]
     : ["Nr.","Übung","1x","2x","3x","Datum","Bemerkung"];
   const rows = [header];
+  const pushCustomRow = (nrLabel, it)=>{
+    const row = [
+      nrLabel, it.text + " (eigene Übung)",
+      it.c1?"X":"", it.c2?"X":"", it.c3?"X":"",
+      it.date||""
+    ];
+    if(isMensch) row.push("");
+    row.push(it.remark||"");
+    rows.push(row);
+  };
   DATA[track].forEach(st=>{
     rows.push([`Stufe ${st.n}: ${st.title}`]);
+    const bucket = dog.customItems[track] && dog.customItems[track][st.n];
     st.items.forEach((text, idx)=>{
       const it = dog[track][st.n][idx];
       const row = [
@@ -1410,18 +1524,11 @@ function excelRows(dog, track){
       if(isMensch) row.push(reqLabel(st.req));
       row.push(it.remark||"");
       rows.push(row);
+      const byItem = (bucket && bucket.byItem && bucket.byItem[String(idx)]) || [];
+      byItem.forEach(it2 => pushCustomRow(`${st.n}.${idx+1}+`, it2));
     });
-    const custom = (dog.customItems[track] && dog.customItems[track][st.n]) || [];
-    custom.forEach(it=>{
-      const row = [
-        `${st.n}.+`, it.text + " (eigene Übung)",
-        it.c1?"X":"", it.c2?"X":"", it.c3?"X":"",
-        it.date||""
-      ];
-      if(isMensch) row.push(reqLabel(st.req));
-      row.push(it.remark||"");
-      rows.push(row);
-    });
+    const end = (bucket && bucket.end) || [];
+    end.forEach(it => pushCustomRow(`${st.n}.+`, it));
   });
   return rows;
 }
@@ -1470,10 +1577,18 @@ function buildPrintHTML(dog){
     <h1>Trainingsplan Verbellen – Kiste &amp; Person</h1>
     <p>Hund: ${escapeHtml(dog.name || "-")} &nbsp;·&nbsp; Stand: ${todayISO()} &nbsp;·&nbsp; Gesamtfortschritt: ${prog.done}/${prog.total}</p>
   </div>`;
+  const printCustomRow = (it)=> `<div class="print-item">
+          <span class="print-id">＋</span>
+          <span class="print-text">${escapeHtml(it.text)} (eigene Übung)</span>
+          <span class="print-marks">${mark(it.c1)}${mark(it.c2)}${mark(it.c3)}</span>
+          <span class="print-date">${escapeHtml(it.date||"")}</span>
+          <span class="print-remark">${escapeHtml(it.remark||"")}</span>
+        </div>`;
   [["box","Box (Kiste)"],["mensch","Mensch"]].forEach(([track,label])=>{
     html += `<h2 class="print-track">${label}</h2>`;
     DATA[track].forEach(st=>{
       const items = dog[track][st.n];
+      const bucket = dog.customItems[track] && dog.customItems[track][st.n];
       html += `<div class="print-stage"><div class="print-stage-title">Stufe ${st.n}: ${escapeHtml(st.title)}</div>`;
       st.items.forEach((text, idx)=>{
         const it = items[idx];
@@ -1484,17 +1599,11 @@ function buildPrintHTML(dog){
           <span class="print-date">${escapeHtml(it.date||"")}</span>
           <span class="print-remark">${escapeHtml(it.remark||"")}</span>
         </div>`;
+        const byItem = (bucket && bucket.byItem && bucket.byItem[String(idx)]) || [];
+        byItem.forEach(it2 => { html += printCustomRow(it2); });
       });
-      const custom = (dog.customItems[track] && dog.customItems[track][st.n]) || [];
-      custom.forEach(it=>{
-        html += `<div class="print-item">
-          <span class="print-id">＋</span>
-          <span class="print-text">${escapeHtml(it.text)} (eigene Übung)</span>
-          <span class="print-marks">${mark(it.c1)}${mark(it.c2)}${mark(it.c3)}</span>
-          <span class="print-date">${escapeHtml(it.date||"")}</span>
-          <span class="print-remark">${escapeHtml(it.remark||"")}</span>
-        </div>`;
-      });
+      const end = (bucket && bucket.end) || [];
+      end.forEach(it => { html += printCustomRow(it); });
       html += `</div>`;
     });
   });
