@@ -559,7 +559,7 @@ function normalizeDog(rawDog){
   return d;
 }
 function defaultAppState(){
-  return { dogs: {}, dogOrder: [], currentDogId: null, ui:{ view:"list", tab:"box", hideCompleted:false } };
+  return { dogs: {}, dogOrder: [], deletedDogIds: [], currentDogId: null, ui:{ view:"list", tab:"box", hideCompleted:false } };
 }
 function loadState(){
   try{
@@ -571,6 +571,7 @@ function loadState(){
       (parsed.dogOrder || Object.keys(parsed.dogs||{})).forEach(id=>{
         if(parsed.dogs && parsed.dogs[id]) base.dogs[id] = normalizeDog(parsed.dogs[id]);
       });
+      base.deletedDogIds = Array.isArray(parsed.deletedDogIds) ? parsed.deletedDogIds.slice() : [];
       base.currentDogId = parsed.currentDogId || null;
       base.ui = Object.assign({view:"list", tab:"box", hideCompleted:false}, parsed.ui||{});
       if(base.currentDogId && !base.dogs[base.currentDogId]) base.currentDogId = null;
@@ -690,15 +691,32 @@ async function cloudPut(data, retry){
   syncMeta.sha = json.content.sha;
 }
 function mergeRemoteIntoState(remote){
+  // Loesch-Markierungen (Tombstones) aus beiden Seiten vereinigen, damit ein auf einem
+  // anderen Geraet geloeschter Hund ueberall geloescht bleibt und nicht wieder auftaucht.
+  const remoteDeleted = Array.isArray(remote.deletedDogIds) ? remote.deletedDogIds : [];
+  const deletedSet = new Set([...(state.deletedDogIds||[]), ...remoteDeleted]);
+  state.deletedDogIds = Array.from(deletedSet);
+
+  // Bereits als geloescht markierte Hunde lokal konsequent entfernen (z.B. falls sie durch
+  // einen aelteren Sync-Stand wieder aufgetaucht waeren).
+  deletedSet.forEach(id=>{
+    if(state.dogs[id]) delete state.dogs[id];
+  });
+  state.dogOrder = state.dogOrder.filter(id=> state.dogs[id] && !deletedSet.has(id));
+
   // Lokale Daten haben immer Vorrang: bestehende Hunde werden nie durch die Cloud-Version
-  // ueberschrieben. Nur Hunde, die lokal noch gar nicht existieren, werden aus der Cloud uebernommen.
+  // ueberschrieben. Nur Hunde, die lokal noch gar nicht existieren UND nicht als geloescht
+  // markiert sind, werden aus der Cloud uebernommen.
   const remoteOrder = remote.dogOrder || Object.keys(remote.dogs || {});
   remoteOrder.forEach(id=>{
-    if(!state.dogs[id] && remote.dogs && remote.dogs[id]){
+    if(!state.dogs[id] && !deletedSet.has(id) && remote.dogs && remote.dogs[id]){
       state.dogs[id] = normalizeDog(remote.dogs[id]);
       state.dogOrder.push(id);
     }
   });
+
+  if(state.currentDogId && !state.dogs[state.currentDogId]) state.currentDogId = null;
+  if(!state.currentDogId && state.ui.view === "tracker") state.ui.view = "list";
 }
 async function pullFromCloud(){
   if(!syncConfig) return;
@@ -719,7 +737,7 @@ async function pullFromCloud(){
   }
 }
 function cloudDataFromState(){
-  return { dogs: state.dogs, dogOrder: state.dogOrder };
+  return { dogs: state.dogs, dogOrder: state.dogOrder, deletedDogIds: state.deletedDogIds };
 }
 function scheduleCloudPush(){
   if(!syncConfig) return;
@@ -940,6 +958,7 @@ function renderDogGrid(){
       if(confirm(`Hund "${dog.name || "Unbenannter Hund"}" inklusive gesamtem Trainingsfortschritt wirklich löschen?`)){
         delete state.dogs[id];
         state.dogOrder = state.dogOrder.filter(x=>x!==id);
+        if(!state.deletedDogIds.includes(id)) state.deletedDogIds.push(id);
         if(state.currentDogId === id) state.currentDogId = null;
         saveState();
         renderDogGrid();
