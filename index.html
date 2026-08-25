@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
 <title>Trainingsplan Verbellen – Fortschritt</title>
+<meta name="app-version" content="1.0.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -160,6 +161,9 @@
   }
   footer{
     text-align:center; color:var(--muted); font-size:.75rem; margin-top:24px;
+  }
+  .version-tag{
+    text-align:center; color:var(--muted); font-size:.7rem; opacity:.7; margin-top:8px;
   }
   .savehint{
     position:fixed; bottom:calc(14px + env(safe-area-inset-bottom)); right:calc(14px + env(safe-area-inset-right));
@@ -344,6 +348,10 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
 
 </script>
 <script>
+/* App-Version: bei jeder Aenderung hochzaehlen, muss zum <meta name="app-version"> im <head>
+   passen (der "Aktualisieren"-Button vergleicht beides, um eine veraltete Version zu erkennen). */
+const APP_VERSION = "1.0.0";
+
 /* ---------- Datenmodell (aus Trainingsplan_Verbellen.xlsx) ---------- */
 function rep(counts, tmpl){ return counts.map(function(c){ return tmpl(c); }); }
 
@@ -521,7 +529,6 @@ function newDog(name){
     createdAt: new Date().toISOString(),
     box: emptyTrackState("box"),
     mensch: emptyTrackState("mensch"),
-    openStages: {},
     boxDisabled: false,
     customItems: { box:{}, mensch:{} }
   };
@@ -560,7 +567,8 @@ function normalizeDog(rawDog){
       }
     });
   });
-  d.openStages = rawDog.openStages || {};
+  // Hinweis: "openStages" (auf-/zugeklappte Stufen) ist bewusst NICHT Teil des Hunde-Objekts -
+  // siehe state.openStagesByDog. Reine Geraete-UI-Anzeige, die nie synchronisiert wird.
   d.boxDisabled = !!(rawDog && rawDog.boxDisabled);
   ["box","mensch"].forEach(track=>{
     const raw = (rawDog.customItems && rawDog.customItems[track]) || {};
@@ -587,7 +595,7 @@ function normalizeDog(rawDog){
   return d;
 }
 function defaultAppState(){
-  return { dogs: {}, dogOrder: [], deletedDogIds: [], currentDogId: null, ui:{ view:"list", tab:"box", hideCompleted:false } };
+  return { dogs: {}, dogOrder: [], deletedDogIds: [], openStagesByDog: {}, currentDogId: null, ui:{ view:"list", tab:"box", hideCompleted:false } };
 }
 function loadState(){
   try{
@@ -600,6 +608,16 @@ function loadState(){
         if(parsed.dogs && parsed.dogs[id]) base.dogs[id] = normalizeDog(parsed.dogs[id]);
       });
       base.deletedDogIds = Array.isArray(parsed.deletedDogIds) ? parsed.deletedDogIds.slice() : [];
+      // "openStagesByDog" ist reiner Geraete-UI-Zustand (wird nie synchronisiert). Neues Format
+      // zuerst pruefen; falls nicht vorhanden, aus einem aelteren lokalen Stand migrieren, bei
+      // dem der Auf-/Zugeklappt-Status noch je Hund unter "openStages" lag.
+      base.openStagesByDog = (parsed.openStagesByDog && typeof parsed.openStagesByDog === "object") ? parsed.openStagesByDog : {};
+      Object.keys(base.dogs).forEach(id=>{
+        if(!base.openStagesByDog[id] && parsed.dogs && parsed.dogs[id] && parsed.dogs[id].openStages){
+          base.openStagesByDog[id] = parsed.dogs[id].openStages;
+        }
+        if(!base.openStagesByDog[id]) base.openStagesByDog[id] = {};
+      });
       base.currentDogId = parsed.currentDogId || null;
       base.ui = Object.assign({view:"list", tab:"box", hideCompleted:false}, parsed.ui||{});
       if(base.currentDogId && !base.dogs[base.currentDogId]) base.currentDogId = null;
@@ -611,9 +629,10 @@ function loadState(){
     if(oldRaw){
       const oldParsed = JSON.parse(oldRaw);
       const base = defaultAppState();
-      const dog = normalizeDog({name: oldParsed.dogName || "", box: oldParsed.box, mensch: oldParsed.mensch, openStages: oldParsed.openStages});
+      const dog = normalizeDog({name: oldParsed.dogName || "", box: oldParsed.box, mensch: oldParsed.mensch});
       base.dogs[dog.id] = dog;
       base.dogOrder = [dog.id];
+      base.openStagesByDog[dog.id] = oldParsed.openStages || {};
       base.currentDogId = dog.id;
       base.ui = {view:"tracker", tab:"box"};
       return base;
@@ -648,6 +667,14 @@ function saveState(){
 }
 function currentDog(){
   return state.currentDogId ? state.dogs[state.currentDogId] : null;
+}
+// Auf-/zugeklappte Stufen je Hund: bewusst getrennt vom Hunde-Objekt selbst, damit dieser
+// reine Geraete-UI-Zustand nie in die Cloud gelangt und daher auch nie durch einen
+// Hintergrund-Abgleich (der den Hunde-Datensatz ersetzen kann) verloren gehen oder
+// zurueckspringen kann.
+function getOpenStages(dogId){
+  if(!state.openStagesByDog[dogId]) state.openStagesByDog[dogId] = {};
+  return state.openStagesByDog[dogId];
 }
 
 /* ---------- Cloud-Sync (optional, ueber GitHub-Repo als Datenspeicher) ---------- */
@@ -918,6 +945,40 @@ function render(){
 /* ---------- Hundeauswahl ---------- */
 let dogSearchQuery = "";
 
+// Prueft per cache-umgehendem Fetch der eigenen Seite, ob eine neuere Version deployt ist
+// (Vergleich ueber das <meta name="app-version">-Tag). Ist eine neue Version da, wird sie
+// geladen; ist bereits die neueste Version aktiv, gibt es eine kurze Bestaetigung; schlaegt
+// die Pruefung fehl (z.B. kein Internet), wird eine klare Fehlermeldung angezeigt statt
+// stillschweigend nichts zu tun.
+async function checkAndLoadLatestVersion(btn){
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "🔄 Prüfe Version …";
+  try{
+    const url = new URL(window.location.href);
+    url.hash = "";
+    url.searchParams.set("_r", Date.now().toString());
+    const res = await fetch(url.toString(), { cache: "no-store" });
+    if(!res.ok) throw new Error("Server antwortete mit HTTP " + res.status);
+    const text = await res.text();
+    const match = text.match(/<meta\s+name="app-version"\s+content="([^"]*)"/i);
+    if(!match) throw new Error("Versionsnummer konnte auf dem Server nicht gefunden werden");
+    const remoteVersion = match[1];
+    if(remoteVersion === APP_VERSION){
+      btn.disabled = false;
+      btn.textContent = originalLabel;
+      alert("Du nutzt bereits die neueste Version (" + APP_VERSION + ").");
+      return;
+    }
+    btn.textContent = "🔄 Neue Version " + remoteVersion + " wird geladen …";
+    window.location.href = url.toString();
+  }catch(e){
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+    alert("Aktualisierung fehlgeschlagen: Es konnte nicht geprüft werden, ob die neueste Version geladen ist (" + e.message + "). Bitte Internetverbindung prüfen und erneut versuchen.");
+  }
+}
+
 function renderDogListView(){
   appEl.innerHTML = `
     <header>
@@ -947,16 +1008,11 @@ function renderDogListView(){
       </div>
     </div>
     <footer>Ohne eingerichteten Cloud-Sync bleiben alle Daten ausschließlich lokal in diesem Browser (localStorage) – keine Übertragung ins Internet. Mit eingerichtetem Cloud-Sync werden sie zusätzlich per HTTPS mit deinem privaten GitHub-Repository abgeglichen.</footer>
+    <div class="version-tag">Version ${APP_VERSION}</div>
   `;
 
   document.getElementById("syncSettingsBtn").addEventListener("click", openSyncModal);
-  document.getElementById("refreshAppBtn").addEventListener("click", (e)=>{
-    e.currentTarget.disabled = true;
-    e.currentTarget.textContent = "🔄 Lädt …";
-    const url = new URL(window.location.href);
-    url.searchParams.set("_r", Date.now().toString());
-    window.location.href = url.toString();
-  });
+  document.getElementById("refreshAppBtn").addEventListener("click", (e)=>checkAndLoadLatestVersion(e.currentTarget));
   updateSyncBadge();
 
   document.getElementById("dogSearchInput").addEventListener("input", e=>{
@@ -1026,13 +1082,15 @@ function renderDogGrid(){
       if(e.target.closest(".icon-btn")) return;
       state.currentDogId = id;
       state.ui.view = "tracker";
-      saveState();
+      saveLocalOnly();
       render();
     });
     card.querySelector('[data-act="rename"]').addEventListener("click", ()=>{
-      const name = prompt("Neuer Name für den Hund:", dog.name || "");
+      const liveDog = state.dogs[id];
+      if(!liveDog) return;
+      const name = prompt("Neuer Name für den Hund:", liveDog.name || "");
       if(name !== null){
-        dog.name = name.trim();
+        liveDog.name = name.trim();
         saveState();
         renderDogGrid();
       }
@@ -1041,6 +1099,7 @@ function renderDogGrid(){
       if(confirm(`Hund "${dog.name || "Unbenannter Hund"}" inklusive gesamtem Trainingsfortschritt wirklich löschen?`)){
         delete state.dogs[id];
         state.dogOrder = state.dogOrder.filter(x=>x!==id);
+        delete state.openStagesByDog[id];
         if(!state.deletedDogIds.includes(id)) state.deletedDogIds.push(id);
         if(state.currentDogId === id) state.currentDogId = null;
         saveState();
@@ -1156,16 +1215,19 @@ function renderTrackerView(){
     });
   });
   document.getElementById("expandAllBtn").addEventListener("click", ()=>{
-    DATA[currentTab].forEach(st => dog.openStages[currentTab+"-"+st.n] = true);
+    const openStages = getOpenStages(dog.id);
+    DATA[currentTab].forEach(st => openStages[currentTab+"-"+st.n] = true);
     saveLocalOnly(); render();
   });
   document.getElementById("collapseAllBtn").addEventListener("click", ()=>{
-    DATA[currentTab].forEach(st => dog.openStages[currentTab+"-"+st.n] = false);
+    const openStages = getOpenStages(dog.id);
+    DATA[currentTab].forEach(st => openStages[currentTab+"-"+st.n] = false);
     saveLocalOnly(); render();
   });
   document.getElementById("collapseDoneBtn").addEventListener("click", ()=>{
+    const openStages = getOpenStages(dog.id);
     DATA[currentTab].forEach(st=>{
-      if(stageComplete(dog, currentTab, st.n)) dog.openStages[currentTab+"-"+st.n] = false;
+      if(stageComplete(dog, currentTab, st.n)) openStages[currentTab+"-"+st.n] = false;
     });
     saveLocalOnly(); render();
   });
@@ -1186,16 +1248,16 @@ function renderTrackerView(){
       if(!liveDog) return;
       liveDog.box = emptyTrackState("box");
       liveDog.mensch = emptyTrackState("mensch");
-      liveDog.openStages = {};
+      state.openStagesByDog[liveDog.id] = {};
       saveState();
       render();
     }
   });
-  document.getElementById("exportJsonBtn").addEventListener("click", ()=>exportDogJson(dog));
+  document.getElementById("exportJsonBtn").addEventListener("click", ()=>exportDogJson(state.dogs[dog.id] || dog));
   document.getElementById("importJsonBtn").addEventListener("click", ()=>document.getElementById("importJsonFile").click());
-  document.getElementById("importJsonFile").addEventListener("change", e=>handleImportDogFile(e, dog));
-  document.getElementById("exportExcelBtn").addEventListener("click", ()=>exportDogExcel(dog));
-  document.getElementById("exportPdfBtn").addEventListener("click", ()=>exportDogPdf(dog));
+  document.getElementById("importJsonFile").addEventListener("change", e=>handleImportDogFile(e, state.dogs[dog.id] || dog));
+  document.getElementById("exportExcelBtn").addEventListener("click", ()=>exportDogExcel(state.dogs[dog.id] || dog));
+  document.getElementById("exportPdfBtn").addEventListener("click", ()=>exportDogPdf(state.dogs[dog.id] || dog));
 
   renderTrackerBody(dog, currentTab);
 }
@@ -1253,7 +1315,7 @@ function renderStage(dog, track, st){
   const items = dog[track][st.n];
   const doneCount = items.filter(it=>it.c1&&it.c2&&it.c3).length;
   const complete = doneCount === items.length;
-  const isOpen = !!dog.openStages[track+"-"+st.n];
+  const isOpen = !!getOpenStages(dog.id)[track+"-"+st.n];
 
   const wrap = document.createElement("div");
   wrap.className = "stage" + (complete?" done":"") + (isOpen?" open":"");
@@ -1286,7 +1348,7 @@ function renderStage(dog, track, st){
     <div class="chev">▶</div>
   `;
   head.addEventListener("click", ()=>{
-    dog.openStages[track+"-"+st.n] = !isOpen;
+    getOpenStages(dog.id)[track+"-"+st.n] = !isOpen;
     saveLocalOnly();
     render();
   });
@@ -1819,8 +1881,9 @@ async function initApp(){
 
   // Automatischer Hintergrund-Sync fuer "quasi live"-Staende auf allen Geraeten: sobald
   // wieder Internet da ist, wenn die Seite/der Tab wieder sichtbar wird, und zusaetzlich
-  // alle 15s als laufender Abgleich. Aktualisiert dabei auch sichtbar die gerade geoeffnete
-  // Ansicht (siehe safeRefreshUI), unterbricht aber keine gerade aktive Texteingabe.
+  // alle 15s als laufender Abgleich. Aktualisiert dabei sichtbar nur die Hundeliste (siehe
+  // safeRefreshUI) - die Trainings-Ansicht eines geoeffneten Hundes wird bewusst nie
+  // automatisch neu gezeichnet, damit Aufklappen/Eingaben dort nie unterbrochen werden.
   window.addEventListener("online", ()=>{ syncNow(); });
   document.addEventListener("visibilitychange", ()=>{
     if(document.visibilityState === "visible") syncNow();
