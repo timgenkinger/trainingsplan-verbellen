@@ -663,7 +663,7 @@ function clearSyncConfig(){
   syncMeta.status = "unconfigured";
 }
 let syncConfig = loadSyncConfig();
-let syncMeta = { status: syncConfig ? "idle" : "unconfigured", lastError:null, sha:null, lastSyncedAt:null, pushTimer:null };
+let syncMeta = { status: syncConfig ? "idle" : "unconfigured", lastError:null, sha:null, lastSyncedAt:null, pushTimer:null, inFlight:false };
 
 function utf8ToBase64(str){
   const bytes = new TextEncoder().encode(str);
@@ -718,42 +718,73 @@ async function cloudPut(data, retry){
   const json = await res.json();
   syncMeta.sha = json.content.sha;
 }
+function dogProgressScore(dog){
+  // Anzahl vollstaendig abgeschlossener Original-Uebungen (Box+Mensch). Zusatzuebungen zaehlen
+  // bewusst nicht mit, da sie keinen Einfluss auf den Trainingsfortschritt haben sollen.
+  return overallProgress(dog).done;
+}
 function mergeRemoteIntoState(remote){
-  // Loesch-Markierungen (Tombstones) aus beiden Seiten vereinigen, damit ein auf einem
-  // anderen Geraet geloeschter Hund ueberall geloescht bleibt und nicht wieder auftaucht.
+  // Loesch-Markierungen (Tombstones) aus beiden Seiten vereinigen: eine Loeschung gewinnt immer,
+  // unabhaengig vom Fortschrittsvergleich, damit ein geloeschter Hund nie wieder auftaucht.
   const remoteDeleted = Array.isArray(remote.deletedDogIds) ? remote.deletedDogIds : [];
   const deletedSet = new Set([...(state.deletedDogIds||[]), ...remoteDeleted]);
   state.deletedDogIds = Array.from(deletedSet);
-
-  // Bereits als geloescht markierte Hunde lokal konsequent entfernen (z.B. falls sie durch
-  // einen aelteren Sync-Stand wieder aufgetaucht waeren).
   deletedSet.forEach(id=>{
     if(state.dogs[id]) delete state.dogs[id];
   });
-  state.dogOrder = state.dogOrder.filter(id=> state.dogs[id] && !deletedSet.has(id));
 
-  // Lokale Daten haben immer Vorrang: bestehende Hunde werden nie durch die Cloud-Version
-  // ueberschrieben. Nur Hunde, die lokal noch gar nicht existieren UND nicht als geloescht
-  // markiert sind, werden aus der Cloud uebernommen.
-  const remoteOrder = remote.dogOrder || Object.keys(remote.dogs || {});
-  remoteOrder.forEach(id=>{
-    if(!state.dogs[id] && !deletedSet.has(id) && remote.dogs && remote.dogs[id]){
-      state.dogs[id] = normalizeDog(remote.dogs[id]);
-      state.dogOrder.push(id);
+  // Pro Hund: die Cloud-Version gewinnt immer, AUSSER der lokale Stand ist nachweislich weiter
+  // (mehr abgeschlossene Uebungen) als der Cloud-Stand. Bei Gleichstand gewinnt die Cloud.
+  const remoteDogs = remote.dogs || {};
+  const remoteOrder = remote.dogOrder || Object.keys(remoteDogs);
+  const allIds = new Set([...(state.dogOrder||[]), ...remoteOrder]);
+
+  allIds.forEach(id=>{
+    if(deletedSet.has(id)) return;
+    const localDog = state.dogs[id];
+    const remoteRaw = remoteDogs[id];
+
+    if(!localDog && remoteRaw){
+      // Nur in der Cloud vorhanden -> uebernehmen.
+      state.dogs[id] = normalizeDog(remoteRaw);
+      if(!state.dogOrder.includes(id)) state.dogOrder.push(id);
+      return;
+    }
+    if(localDog && !remoteRaw){
+      // Nur lokal vorhanden (z.B. gerade erst angelegt) -> lokal behalten, wird hochgeladen.
+      if(!state.dogOrder.includes(id)) state.dogOrder.push(id);
+      return;
+    }
+    if(localDog && remoteRaw){
+      const remoteDog = normalizeDog(remoteRaw);
+      const localAhead = dogProgressScore(localDog) > dogProgressScore(remoteDog);
+      if(!localAhead){
+        // Cloud ist mindestens gleich weit -> Cloud-Version uebernehmen.
+        state.dogs[id] = remoteDog;
+      }
+      // sonst: lokal ist echt weiter -> lokale Version bleibt fuehrend und wird hochgeladen.
+      if(!state.dogOrder.includes(id)) state.dogOrder.push(id);
     }
   });
+
+  state.dogOrder = state.dogOrder.filter(id=> state.dogs[id] && !deletedSet.has(id));
 
   if(state.currentDogId && !state.dogs[state.currentDogId]) state.currentDogId = null;
   if(!state.currentDogId && state.ui.view === "tracker") state.ui.view = "list";
 }
 async function pullFromCloud(){
   if(!syncConfig) return;
+  if(syncMeta.inFlight) return; // laeuft bereits ein Abgleich, keine ueberlappenden Anfragen
+  syncMeta.inFlight = true;
   syncMeta.status = "syncing";
+  updateSyncBadge();
   try{
     const remote = await cloudGet();
+    // Pro Hund gewinnt die Cloud, ausser der lokale Stand ist nachweislich weiter (siehe
+    // mergeRemoteIntoState). Anschliessend wird das Ergebnis in die Cloud zurueckgeschrieben,
+    // damit dort immer der jeweils fortgeschrittenste Stand jedes Hundes liegt.
     if(remote) mergeRemoteIntoState(remote);
-    // Lokaler Stand ist fuehrend: Cloud direkt danach an den (ggf. um neue Hunde ergaenzten)
-    // lokalen Stand angleichen, statt lokale Aenderungen durch die Cloud-Version zu verlieren.
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     await cloudPut(cloudDataFromState());
     syncMeta.status = "synced";
     syncMeta.lastError = null;
@@ -763,6 +794,13 @@ async function pullFromCloud(){
     syncMeta.lastError = e.message;
     console.warn("Cloud-Sync fehlgeschlagen:", e);
   }
+  syncMeta.inFlight = false;
+  updateSyncBadge();
+}
+// Semantischer Alias: wird von automatischen Ausloesern (online-Event, periodischer Timer,
+// Sichtbarkeitswechsel, Aktualisieren-Button) verwendet.
+function syncNow(){
+  return pullFromCloud();
 }
 function cloudDataFromState(){
   return { dogs: state.dogs, dogOrder: state.dogOrder, deletedDogIds: state.deletedDogIds };
@@ -772,21 +810,11 @@ function scheduleCloudPush(){
   clearTimeout(syncMeta.pushTimer);
   syncMeta.status = "pending";
   updateSyncBadge();
-  syncMeta.pushTimer = setTimeout(async ()=>{
-    syncMeta.status = "syncing";
-    updateSyncBadge();
-    try{
-      await cloudPut(cloudDataFromState());
-      syncMeta.status = "synced";
-      syncMeta.lastError = null;
-      syncMeta.lastSyncedAt = new Date();
-    }catch(e){
-      syncMeta.status = "error";
-      syncMeta.lastError = e.message;
-      console.warn("Cloud-Sync (Speichern) fehlgeschlagen:", e);
-    }
-    updateSyncBadge();
-  }, 2500);
+  syncMeta.pushTimer = setTimeout(()=>{
+    // Laeuft ueber denselben Abgleich wie ein Pull: so wird die eigene Aenderung nur dann
+    // hochgeladen, wenn dieser Hund dadurch tatsaechlich weiter ist als der Cloud-Stand.
+    pullFromCloud();
+  }, 700);
 }
 function syncStatusText(){
   if(!syncConfig) return "nicht eingerichtet";
@@ -1704,9 +1732,19 @@ function closeSyncModal(){
 async function initApp(){
   if(syncConfig){
     await pullFromCloud();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }
   render();
+
+  // Automatischer Hintergrund-Sync: sobald wieder Internet da ist, wenn die Seite/der Tab
+  // wieder sichtbar wird, und zusaetzlich alle 45s als Sicherheitsnetz. Laeuft still im
+  // Hintergrund (aktualisiert nur den Sync-Badge, keinen erzwungenen Re-Render), damit
+  // laufende Eingaben nicht unterbrochen werden. Ein manueller Refresh ueber den
+  // "Aktualisieren"-Button zeigt den neuen Stand dann sofort sichtbar an.
+  window.addEventListener("online", ()=>{ syncNow(); });
+  document.addEventListener("visibilitychange", ()=>{
+    if(document.visibilityState === "visible") syncNow();
+  });
+  setInterval(()=>{ syncNow(); }, 45000);
 }
 initApp();
 </script>
