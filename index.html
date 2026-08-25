@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
 <title>Trainingsplan Verbellen – Fortschritt</title>
-<meta name="app-version" content="1.0.0">
+<meta name="app-version" content="1.0.1">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -319,6 +319,7 @@
 
 <div id="printArea"></div>
 <div id="syncModalRoot"></div>
+<div id="promptModalRoot"></div>
 <div class="savehint" id="saveHint">Gespeichert ✓</div>
 
 <script>
@@ -350,7 +351,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
 <script>
 /* App-Version: bei jeder Aenderung hochzaehlen, muss zum <meta name="app-version"> im <head>
    passen (der "Aktualisieren"-Button vergleicht beides, um eine veraltete Version zu erkennen). */
-const APP_VERSION = "1.0.0";
+const APP_VERSION = "1.0.1";
 
 /* ---------- Datenmodell (aus Trainingsplan_Verbellen.xlsx) ---------- */
 function rep(counts, tmpl){ return counts.map(function(c){ return tmpl(c); }); }
@@ -1088,12 +1089,19 @@ function renderDogGrid(){
     card.querySelector('[data-act="rename"]').addEventListener("click", ()=>{
       const liveDog = state.dogs[id];
       if(!liveDog) return;
-      const name = prompt("Neuer Name für den Hund:", liveDog.name || "");
-      if(name !== null){
-        liveDog.name = name.trim();
-        saveState();
-        renderDogGrid();
-      }
+      showTextPromptModal({
+        title: "Hund umbenennen",
+        label: "Neuer Name für den Hund:",
+        defaultValue: liveDog.name || "",
+        confirmLabel: "Speichern",
+        onConfirm: (name)=>{
+          const d = state.dogs[id];
+          if(!d) return;
+          d.name = name;
+          saveState();
+          renderDogGrid();
+        }
+      });
     });
     card.querySelector('[data-act="delete"]').addEventListener("click", ()=>{
       if(confirm(`Hund "${dog.name || "Unbenannter Hund"}" inklusive gesamtem Trainingsfortschritt wirklich löschen?`)){
@@ -1354,14 +1362,19 @@ function renderStage(dog, track, st){
   });
   head.querySelector(".add-custom-trigger").addEventListener("click", (e)=>{
     e.stopPropagation();
-    const text = prompt("Neue Zusatzübung nach Stufe " + st.n + " (" + st.title + "):");
-    if(text && text.trim()){
-      const liveDog = state.dogs[dog.id];
-      if(!liveDog) return;
-      customBucket(liveDog, track, st.n).end.push(newCustomItem(text.trim()));
-      saveState();
-      render();
-    }
+    const dogId = dog.id;
+    showTextPromptModal({
+      title: "Zusatzübung hinzufügen",
+      label: "Neue Zusatzübung nach Stufe " + st.n + " (" + st.title + "):",
+      confirmLabel: "Hinzufügen",
+      onConfirm: (text)=>{
+        const liveDog = state.dogs[dogId];
+        if(!liveDog) return;
+        customBucket(liveDog, track, st.n).end.push(newCustomItem(text));
+        saveState();
+        render();
+      }
+    });
   });
   wrap.appendChild(head);
 
@@ -1581,17 +1594,21 @@ function renderItem(dog, track, stageN, idx, text){
     saveState();
   });
   row.querySelector(".add-custom-trigger").addEventListener("click", ()=>{
-    const text2 = prompt("Neue Zusatzübung nach Übung " + id + ":");
-    if(text2 && text2.trim()){
-      const liveDog = state.dogs[dogId];
-      if(!liveDog) return;
-      const bucket = customBucket(liveDog, track, stageN);
-      const key = String(idx);
-      if(!bucket.byItem[key]) bucket.byItem[key] = [];
-      bucket.byItem[key].push(newCustomItem(text2.trim()));
-      saveState();
-      render();
-    }
+    showTextPromptModal({
+      title: "Zusatzübung hinzufügen",
+      label: "Neue Zusatzübung nach Übung " + id + ":",
+      confirmLabel: "Hinzufügen",
+      onConfirm: (text2)=>{
+        const liveDog = state.dogs[dogId];
+        if(!liveDog) return;
+        const bucket = customBucket(liveDog, track, stageN);
+        const key = String(idx);
+        if(!bucket.byItem[key]) bucket.byItem[key] = [];
+        bucket.byItem[key].push(newCustomItem(text2));
+        saveState();
+        render();
+      }
+    });
   });
 
   return row;
@@ -1784,6 +1801,49 @@ function buildPrintHTML(dog){
 function exportDogPdf(dog){
   document.getElementById("printArea").innerHTML = buildPrintHTML(dog);
   window.print();
+}
+
+/* ================= Eingabe-Modal (Ersatz fuer window.prompt) =================
+   window.prompt() ist in als Homescreen-App installierten Web-Apps auf iOS
+   nachweislich unzuverlaessig (mehrfach in Apple-Entwicklerforen dokumentiert:
+   alert/confirm/prompt koennen dort ausbleiben). Deshalb wird fuer alle
+   Texteingaben ein eigenes, zuverlaessiges Modal verwendet statt der nativen
+   Browser-Dialoge. */
+function showTextPromptModal(opts){
+  const root = document.getElementById("promptModalRoot");
+  root.innerHTML = `
+    <div class="modal-overlay" id="promptModalOverlay">
+      <div class="modal-card">
+        <h2>${escapeHtml(opts.title || "")}</h2>
+        ${opts.label ? `<label for="promptModalInput">${escapeHtml(opts.label)}</label>` : ""}
+        <input type="text" id="promptModalInput" placeholder="${escapeAttr(opts.placeholder||"")}" value="${escapeAttr(opts.defaultValue||"")}">
+        <div class="modal-actions">
+          <span></span>
+          <div style="display:flex; gap:8px;">
+            <button class="btn" type="button" id="promptModalCancel">Abbrechen</button>
+            <button class="btn primary" type="button" id="promptModalConfirm">${escapeHtml(opts.confirmLabel || "Speichern")}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  const input = document.getElementById("promptModalInput");
+  function close(){ root.innerHTML = ""; }
+  document.getElementById("promptModalCancel").addEventListener("click", close);
+  document.getElementById("promptModalOverlay").addEventListener("click", e=>{
+    if(e.target.id === "promptModalOverlay") close();
+  });
+  function confirmAction(){
+    const val = input.value.trim();
+    close();
+    if(val) opts.onConfirm(val);
+  }
+  document.getElementById("promptModalConfirm").addEventListener("click", confirmAction);
+  input.addEventListener("keydown", e=>{
+    if(e.key === "Enter"){ e.preventDefault(); confirmAction(); }
+    if(e.key === "Escape"){ close(); }
+  });
+  setTimeout(()=>{ input.focus(); input.select(); }, 30);
 }
 
 /* ================= Cloud-Sync Modal ================= */
