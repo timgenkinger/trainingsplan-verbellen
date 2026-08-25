@@ -795,6 +795,23 @@ async function pullFromCloud(){
     console.warn("Cloud-Sync fehlgeschlagen:", e);
   }
   syncMeta.inFlight = false;
+  // Sichtbare Ansicht auffrischen, damit neue Staende von anderen Geraeten tatsaechlich
+  // "live" zu sehen sind, statt nur still im Hintergrund gespeichert zu werden.
+  safeRefreshUI();
+}
+// Aktualisiert die aktuell sichtbare Ansicht mit dem neuesten Stand, ohne eine gerade
+// aktive Texteingabe (Bemerkung/Datum) zu unterbrechen bzw. ihr den Fokus zu entziehen.
+function safeRefreshUI(){
+  if(state.ui.view === "list"){
+    if(document.getElementById("dogGridHost")) renderDogGrid();
+  }else if(state.ui.view === "tracker" && currentDog()){
+    const active = document.activeElement;
+    const isTypingInStageList = active && active.closest && active.closest("#stageList") &&
+      (active.tagName === "INPUT" || active.tagName === "TEXTAREA");
+    if(!isTypingInStageList && document.getElementById("stageList")){
+      renderTrackerBody(currentDog(), state.ui.tab || "box");
+    }
+  }
   updateSyncBadge();
 }
 // Semantischer Alias: wird von automatischen Ausloesern (online-Event, periodischer Timer,
@@ -1735,16 +1752,15 @@ async function initApp(){
   }
   render();
 
-  // Automatischer Hintergrund-Sync: sobald wieder Internet da ist, wenn die Seite/der Tab
-  // wieder sichtbar wird, und zusaetzlich alle 45s als Sicherheitsnetz. Laeuft still im
-  // Hintergrund (aktualisiert nur den Sync-Badge, keinen erzwungenen Re-Render), damit
-  // laufende Eingaben nicht unterbrochen werden. Ein manueller Refresh ueber den
-  // "Aktualisieren"-Button zeigt den neuen Stand dann sofort sichtbar an.
+  // Automatischer Hintergrund-Sync fuer "quasi live"-Staende auf allen Geraeten: sobald
+  // wieder Internet da ist, wenn die Seite/der Tab wieder sichtbar wird, und zusaetzlich
+  // alle 15s als laufender Abgleich. Aktualisiert dabei auch sichtbar die gerade geoeffnete
+  // Ansicht (siehe safeRefreshUI), unterbricht aber keine gerade aktive Texteingabe.
   window.addEventListener("online", ()=>{ syncNow(); });
   document.addEventListener("visibilitychange", ()=>{
     if(document.visibilityState === "visible") syncNow();
   });
-  setInterval(()=>{ syncNow(); }, 45000);
+  setInterval(()=>{ syncNow(); }, 15000);
 }
 initApp();
 </script>
