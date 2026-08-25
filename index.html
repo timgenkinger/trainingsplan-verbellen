@@ -627,7 +627,11 @@ function loadState(){
 
 let state = loadState();
 let saveTimer = null;
-function saveState(){
+// Speichert nur lokal (localStorage), OHNE Cloud-Sync auszuloesen. Fuer reinen UI-Zustand
+// (Stufe auf-/zugeklappt, aktiver Tab, Suchfeld, "Erledigte ausblenden") - das ist
+// Geraete-eigene Ansichtseinstellung, keine Trainingsdaten, und soll daher nie einen
+// Sync-Zyklus ausloesen (der sonst laufende Bedienung unterbrechen kann).
+function saveLocalOnly(){
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   const hint = document.getElementById("saveHint");
   if(hint){
@@ -635,6 +639,11 @@ function saveState(){
     clearTimeout(saveTimer);
     saveTimer = setTimeout(()=>hint.classList.remove("show"), 900);
   }
+}
+// Speichert lokal UND stoesst einen Cloud-Sync an. Nur fuer echte Trainingsdaten verwenden
+// (Haken, Datum, Bemerkung, Zusatzuebungen, Hundename, Box-ausgesetzt, Hund anlegen/loeschen).
+function saveState(){
+  saveLocalOnly();
   scheduleCloudPush();
 }
 function currentDog(){
@@ -802,16 +811,17 @@ async function pullFromCloud(){
 // Aktualisiert die aktuell sichtbare Ansicht mit dem neuesten Stand, ohne eine gerade
 // aktive Texteingabe (Bemerkung/Datum) zu unterbrechen bzw. ihr den Fokus zu entziehen.
 function safeRefreshUI(){
+  // Hundeliste: gefahrlos live aktualisierbar (Karten greifen ueber die Hunde-ID auf den
+  // aktuellen Stand zu, keine Referenzen auf einzelne Uebungs-Objekte, die veralten koennten).
   if(state.ui.view === "list"){
     if(document.getElementById("dogGridHost")) renderDogGrid();
-  }else if(state.ui.view === "tracker" && currentDog()){
-    const active = document.activeElement;
-    const isTypingInStageList = active && active.closest && active.closest("#stageList") &&
-      (active.tagName === "INPUT" || active.tagName === "TEXTAREA");
-    if(!isTypingInStageList && document.getElementById("stageList")){
-      renderTrackerBody(currentDog(), state.ui.tab || "box");
-    }
   }
+  // Trainings-Ansicht (aufgeklappte Stufen, Haken setzen) bewusst NICHT automatisch neu
+  // rendern: ein Hintergrund-Sync wuerde sonst mitten in der Bedienung aufgeklappte Stufen
+  // wieder zuklappen bzw. laufende Eingaben unterbrechen. Der Sync laeuft weiterhin still im
+  // Hintergrund (state + localStorage sind aktuell); sichtbar wird das beim naechsten
+  // natuerlichen Wechsel (Stufe an-/zuklappen, Tab wechseln, Hund wechseln) oder per
+  // "Aktualisieren"-Button.
   updateSyncBadge();
 }
 // Semantischer Alias: wird von automatischen Ausloesern (online-Event, periodischer Timer,
@@ -1129,48 +1139,54 @@ function renderTrackerView(){
 
   document.getElementById("backBtn").addEventListener("click", ()=>{
     state.ui.view = "list";
-    saveState();
+    saveLocalOnly();
     render();
   });
   document.getElementById("dogNameInput").addEventListener("input", e=>{
-    dog.name = e.target.value;
+    const liveDog = state.dogs[dog.id];
+    if(!liveDog) return;
+    liveDog.name = e.target.value;
     saveState();
   });
   document.querySelectorAll(".tab-btn").forEach(btn=>{
     btn.addEventListener("click", ()=>{
       state.ui.tab = btn.dataset.tab;
-      saveState();
+      saveLocalOnly();
       render();
     });
   });
   document.getElementById("expandAllBtn").addEventListener("click", ()=>{
     DATA[currentTab].forEach(st => dog.openStages[currentTab+"-"+st.n] = true);
-    saveState(); render();
+    saveLocalOnly(); render();
   });
   document.getElementById("collapseAllBtn").addEventListener("click", ()=>{
     DATA[currentTab].forEach(st => dog.openStages[currentTab+"-"+st.n] = false);
-    saveState(); render();
+    saveLocalOnly(); render();
   });
   document.getElementById("collapseDoneBtn").addEventListener("click", ()=>{
     DATA[currentTab].forEach(st=>{
       if(stageComplete(dog, currentTab, st.n)) dog.openStages[currentTab+"-"+st.n] = false;
     });
-    saveState(); render();
+    saveLocalOnly(); render();
   });
   document.getElementById("hideCompletedCheckbox").addEventListener("change", e=>{
     state.ui.hideCompleted = e.target.checked;
-    saveState(); render();
+    saveLocalOnly(); render();
   });
   document.getElementById("boxDisableCheckbox").addEventListener("change", e=>{
-    dog.boxDisabled = e.target.checked;
-    if(dog.boxDisabled && state.ui.tab === "box") state.ui.tab = "mensch";
+    const liveDog = state.dogs[dog.id];
+    if(!liveDog) return;
+    liveDog.boxDisabled = e.target.checked;
+    if(liveDog.boxDisabled && state.ui.tab === "box") state.ui.tab = "mensch";
     saveState(); render();
   });
   document.getElementById("resetBtn").addEventListener("click", ()=>{
     if(confirm(`Wirklich den gesamten Trainingsfortschritt von "${dog.name || "diesem Hund"}" (Box und Mensch) löschen? Das kann nicht rückgängig gemacht werden.`)){
-      dog.box = emptyTrackState("box");
-      dog.mensch = emptyTrackState("mensch");
-      dog.openStages = {};
+      const liveDog = state.dogs[dog.id];
+      if(!liveDog) return;
+      liveDog.box = emptyTrackState("box");
+      liveDog.mensch = emptyTrackState("mensch");
+      liveDog.openStages = {};
       saveState();
       render();
     }
@@ -1271,14 +1287,16 @@ function renderStage(dog, track, st){
   `;
   head.addEventListener("click", ()=>{
     dog.openStages[track+"-"+st.n] = !isOpen;
-    saveState();
+    saveLocalOnly();
     render();
   });
   head.querySelector(".add-custom-trigger").addEventListener("click", (e)=>{
     e.stopPropagation();
     const text = prompt("Neue Zusatzübung nach Stufe " + st.n + " (" + st.title + "):");
     if(text && text.trim()){
-      customBucket(dog, track, st.n).end.push(newCustomItem(text.trim()));
+      const liveDog = state.dogs[dog.id];
+      if(!liveDog) return;
+      customBucket(liveDog, track, st.n).end.push(newCustomItem(text.trim()));
       saveState();
       render();
     }
@@ -1302,6 +1320,13 @@ function renderStage(dog, track, st){
 
 function renderCustomEntry(dog, track, st, item){
   const complete = item.c1 && item.c2 && item.c3;
+  const dogId = dog.id;
+  const itemId = item.id;
+  function liveItem(){
+    const liveDog = state.dogs[dogId];
+    const bucket = liveDog && liveDog.customItems[track] && liveDog.customItems[track][st.n];
+    return (bucket && bucket.end.find(it=>it.id === itemId)) || null;
+  }
 
   const wrap = document.createElement("div");
   wrap.className = "custom-entry" + (complete?" done":"");
@@ -1327,27 +1352,35 @@ function renderCustomEntry(dog, track, st, item){
 
   wrap.querySelectorAll('input[type=checkbox]').forEach(cb=>{
     cb.addEventListener("change", ()=>{
+      const live = liveItem();
+      if(!live) return;
       const k = cb.dataset.k;
-      item[k] = cb.checked;
-      if(k==="c3" && cb.checked && !item.date){
-        item.date = todayISO();
+      live[k] = cb.checked;
+      if(k==="c3" && cb.checked && !live.date){
+        live.date = todayISO();
       }
       saveState();
       render();
     });
   });
   wrap.querySelector('input[type=date]').addEventListener("change", e=>{
-    item.date = e.target.value;
+    const live = liveItem();
+    if(!live) return;
+    live.date = e.target.value;
     saveState();
   });
   wrap.querySelector('input[type=text]').addEventListener("input", e=>{
-    item.remark = e.target.value;
+    const live = liveItem();
+    if(!live) return;
+    live.remark = e.target.value;
     saveState();
   });
   wrap.querySelector(".del-custom-btn").addEventListener("click", ()=>{
     if(confirm(`Zusatzübung "${item.text}" wirklich löschen?`)){
-      const bucket = customBucket(dog, track, st.n);
-      bucket.end = bucket.end.filter(it=>it.id !== item.id);
+      const liveDog = state.dogs[dogId];
+      if(!liveDog) return;
+      const bucket = customBucket(liveDog, track, st.n);
+      bucket.end = bucket.end.filter(it=>it.id !== itemId);
       saveState();
       render();
     }
@@ -1358,6 +1391,14 @@ function renderCustomEntry(dog, track, st, item){
 
 function renderItemLevelCustom(dog, track, st, idx, item){
   const complete = item.c1 && item.c2 && item.c3;
+  const dogId = dog.id;
+  const itemId = item.id;
+  function liveItem(){
+    const liveDog = state.dogs[dogId];
+    const bucket = liveDog && liveDog.customItems[track] && liveDog.customItems[track][st.n];
+    const list = bucket && bucket.byItem && bucket.byItem[String(idx)];
+    return (list && list.find(it=>it.id === itemId)) || null;
+  }
 
   const wrap = document.createElement("div");
   wrap.className = "custom-entry nested" + (complete?" done":"");
@@ -1383,28 +1424,36 @@ function renderItemLevelCustom(dog, track, st, idx, item){
 
   wrap.querySelectorAll('input[type=checkbox]').forEach(cb=>{
     cb.addEventListener("change", ()=>{
+      const live = liveItem();
+      if(!live) return;
       const k = cb.dataset.k;
-      item[k] = cb.checked;
-      if(k==="c3" && cb.checked && !item.date){
-        item.date = todayISO();
+      live[k] = cb.checked;
+      if(k==="c3" && cb.checked && !live.date){
+        live.date = todayISO();
       }
       saveState();
       render();
     });
   });
   wrap.querySelector('input[type=date]').addEventListener("change", e=>{
-    item.date = e.target.value;
+    const live = liveItem();
+    if(!live) return;
+    live.date = e.target.value;
     saveState();
   });
   wrap.querySelector('input[type=text]').addEventListener("input", e=>{
-    item.remark = e.target.value;
+    const live = liveItem();
+    if(!live) return;
+    live.remark = e.target.value;
     saveState();
   });
   wrap.querySelector(".del-custom-btn").addEventListener("click", ()=>{
     if(confirm(`Zusatzübung "${item.text}" wirklich löschen?`)){
-      const bucket = customBucket(dog, track, st.n);
+      const liveDog = state.dogs[dogId];
+      if(!liveDog) return;
+      const bucket = customBucket(liveDog, track, st.n);
       const key = String(idx);
-      bucket.byItem[key] = (bucket.byItem[key] || []).filter(it=>it.id !== item.id);
+      bucket.byItem[key] = (bucket.byItem[key] || []).filter(it=>it.id !== itemId);
       saveState();
       render();
     }
@@ -1416,6 +1465,14 @@ function renderItemLevelCustom(dog, track, st, idx, item){
 function renderItem(dog, track, stageN, idx, text){
   const data = dog[track][stageN][idx];
   const complete = data.c1 && data.c2 && data.c3;
+  const dogId = dog.id;
+  // Zum Interaktionszeitpunkt frisch nachschlagen statt die beim Rendern erfasste
+  // "data"-Referenz zu nutzen: falls ein Hintergrund-Sync zwischenzeitlich den Hund-Datensatz
+  // ausgetauscht hat, landet die Aenderung so trotzdem sicher im aktuellen Objekt.
+  function liveItem(){
+    const liveDog = state.dogs[dogId];
+    return liveDog ? liveDog[track][stageN][idx] : null;
+  }
 
   const row = document.createElement("div");
   row.className = "item" + (complete?" complete":"");
@@ -1438,27 +1495,35 @@ function renderItem(dog, track, stageN, idx, text){
 
   row.querySelectorAll('input[type=checkbox]').forEach(cb=>{
     cb.addEventListener("change", ()=>{
+      const live = liveItem();
+      if(!live) return;
       const k = cb.dataset.k;
-      data[k] = cb.checked;
-      if(k==="c3" && cb.checked && !data.date){
-        data.date = todayISO();
+      live[k] = cb.checked;
+      if(k==="c3" && cb.checked && !live.date){
+        live.date = todayISO();
       }
       saveState();
       render();
     });
   });
   row.querySelector('input[type=date]').addEventListener("change", e=>{
-    data.date = e.target.value;
+    const live = liveItem();
+    if(!live) return;
+    live.date = e.target.value;
     saveState();
   });
   row.querySelector('input[type=text]').addEventListener("input", e=>{
-    data.remark = e.target.value;
+    const live = liveItem();
+    if(!live) return;
+    live.remark = e.target.value;
     saveState();
   });
   row.querySelector(".add-custom-trigger").addEventListener("click", ()=>{
     const text2 = prompt("Neue Zusatzübung nach Übung " + id + ":");
     if(text2 && text2.trim()){
-      const bucket = customBucket(dog, track, stageN);
+      const liveDog = state.dogs[dogId];
+      if(!liveDog) return;
+      const bucket = customBucket(liveDog, track, stageN);
       const key = String(idx);
       if(!bucket.byItem[key]) bucket.byItem[key] = [];
       bucket.byItem[key].push(newCustomItem(text2.trim()));
